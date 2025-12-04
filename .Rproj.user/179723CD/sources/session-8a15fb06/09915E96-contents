@@ -1,0 +1,176 @@
+install.packages("AGHmatrix")
+
+
+### LA ENTREGRA/ COSAS Q HE HECHO ESTA ABAJO
+
+#### DATA ####
+
+# Genotypic matrix (012 coding)
+M <- matrix(c(2,0,1,1,0,0,0,2,1,2,
+              1,0,0,0,0,2,0,2,1,0,
+              1,1,2,1,1,0,0,2,1,2,
+              0,0,2,1,0,1,0,2,2,1,
+              0,1,1,2,0,0,0,2,1,2,
+              1,1,0,1,0,2,0,2,2,1,
+              0,0,1,1,0,2,0,2,2,0,
+              0,1,1,0,0,1,0,2,2,0,
+              2,0,0,0,0,1,2,2,1,2,
+              0,0,0,1,1,2,0,2,0,0,
+              0,1,1,0,0,1,0,2,2,1,
+              1,0,0,0,1,1,0,2,0,0,
+              0,0,0,1,1,2,0,2,1,0,
+              1,0,1,1,0,2,0,1,0,0), nrow=14, byrow=T)
+
+# Pedigree matrix: individual, sire, dam
+PED <- matrix(c(1,0,0, 2,0,0, 3,0,0, 4,0,0,
+                5,0,0, 6,0,0, 7,0,0, 8,0,0, 9,0,0, 10,0,0,
+                11,0,0, 12,0,0, 13,0,0, 14,0,0, 15,13,4,
+                16,15,2, 17,15,5, 18,14,6, 19,14,9, 20,14,9,
+                21,1,3, 22,14,8, 23,14,11, 24,14,10,
+                25,14,7, 26,14,12), nrow=26, byrow=T)
+
+# Phenotype: Daughter Yield Deviation (DYD)
+FAT <- c(9,13.4,12.7,15.4,5.9,7.7,10.2,4.8,7.6,8.8,9.8,9.2,11.5,13.3)
+
+# Variance components
+vara <- 35.241  # additive genetic variance
+vare <- 245     # environmental variance
+
+# Pedigree relationship matrix
+library(AGHmatrix)
+A <- Amatrix(PED, ploidy=2)
+
+#### SNP-BLUP MODEL - REFERENCE POPULATION ####
+
+# Extract reference population (animals 1-8)
+Z_sr <- M[-c(9:14),]
+
+# Allele frequencies in reference population
+freq_sr <- colSums(Z_sr)/(2*nrow(Z_sr))
+
+# Center genotype matrix
+for(j in 1:ncol(Z_sr)){
+  Z_sr[,j] <- Z_sr[,j] - 2*freq_sr[j]
+}
+
+# Total heterozygosity
+het_sr <- sum(2*freq_sr*(1-freq_sr))
+
+# Setup mixed model matrices
+X_sr <- matrix(1, 8, 1)
+I_sr <- diag(10)
+y_sr <- FAT[1:8]
+
+# Regularization parameter: α = het × (σ²ₑ/σ²ₐ)
+alpha_sr <- het_sr * (vare/vara)
+
+# Build and solve normal equations: [X'X X'Z; Z'X Z'Z+Iα][b; g] = [X'y; Z'y]
+LHS_sr <- crossprod(cbind(X_sr, Z_sr))
+neq <- ncol(LHS_sr)
+LHS_sr[2:neq, 2:neq] <- LHS_sr[2:neq, 2:neq] + I_sr * alpha_sr
+
+RHS_sr <- t(cbind(X_sr, Z_sr)) %*% y_sr
+
+sol_sr <- solve(LHS_sr, RHS_sr)
+# sol_sr[1] = mean, sol_sr[2:11] = SNP effects (g)
+
+#### SNP-BLUP MODEL - SELECTION CANDIDATES ####
+
+# Extract selection candidates (animals 9-14)
+Z_ss <- M[-c(1:8),]
+
+# Allele frequencies in selection candidates
+freq_ss <- colSums(Z_ss)/(2*nrow(Z_ss))
+
+# Center genotype matrix
+for(j in 1:ncol(Z_ss)){
+  Z_ss[,j] <- Z_ss[,j] - 2*freq_ss[j]
+}
+
+# Predict genomic breeding values: DGV = Z_ss × g
+a_ss <- round(Z_ss %*% sol_sr[2:11], 3)
+
+#### GBLUP MODEL ####
+
+# Center genotype matrix using all 14 animals
+Z_g <- M
+freq_g <- colSums(Z_g)/(2*nrow(Z_g))
+
+for(j in 1:ncol(Z_g)){
+  Z_g[,j] <- Z_g[,j] - 2*freq_g[j]
+}
+
+# Total heterozygosity
+het_g <- sum(2*freq_g*(1-freq_g))
+
+# Construct genomic relationship matrix: G = (Z × Z') / het
+G_g <- (Z_g %*% t(Z_g)) / het_g
+
+# Fix singularity: add small constant to diagonal
+G_gm <- G_g + diag(nrow(M)) * 0.01
+G_gmi <- solve(G_gm)
+
+# Setup mixed model matrices for all 14 animals
+X_g <- matrix(1, 14, 1)
+W_g <- diag(14)
+y_g <- FAT
+
+# Regularization parameter: α = σ²ₑ/σ²ₐ
+alpha_g <- vare / vara
+
+# Build and solve normal equations: [X'X X'W; W'X W'W+G⁻¹α][b; a] = [X'y; W'y]
+LHS_g <- crossprod(cbind(X_g, W_g))
+neq <- ncol(LHS_g)
+LHS_g[2:neq, 2:neq] <- LHS_g[2:neq, 2:neq] + G_gmi * alpha_g
+
+RHS_g <- t(cbind(X_g, W_g)) %*% y_g
+
+sol_g <- solve(LHS_g, RHS_g)
+# sol_g[1] = mean, sol_g[2:15] = genomic breeding values for all 14 animals
+
+
+
+
+
+
+
+
+getwd()
+
+# BLUP normal
+BLUP <- a_ss + sol_sr[1]
+BLUP
+
+# GBLUP
+sol_g_last_6 <- tail(sol_g, 6) + sol_sr[1]
+sol_g_last_6
+
+# the phenotypes
+FAT_last_6 <- tail(FAT, 6)
+FAT_last_6
+  
+# calculate the square error
+se_snp <- (FAT_last_6 - as.numeric(BLUP))^2
+se_gblup <- (FAT_last_6 - as.numeric(tail(sol_g, 6)))^2 # GBLUP squared errors
+
+print(se_snp)
+print(se_gblup)
+
+
+sum_se_snp <- sum(se_snp) / length(se_snp)
+sum_se_gblup <- sum(se_gblup) / length(se_gblup)
+print(sum_se_snp)
+print(sum_se_gblup)
+
+#consider doing CVXR convex optimization in R for this to find the best combo LATEr
+
+
+for i in range(len(obj)):
+  for j in
+
+
+
+
+
+elemts_blup_gblup
+[index_bluP]

@@ -1,0 +1,410 @@
+# ============================================================================
+# GENOMIC PREDICTION: SNP-BLUP MODEL
+# Universitat Autònoma de Barcelona - Genetics Degree
+# Integrated Laboratory V (GQM)
+# ============================================================================
+# This script implements genomic selection using SNP-BLUP model
+# Data: Mrode (2014) - Phenotypic data corrected for systematic effects,
+#       pedigree data, and molecular markers (SNP genotypes coded as 0, 1, 2)
+# ============================================================================
+
+# Install required library for pedigree relationship matrices
+if (!requireNamespace("AGHmatrix", quietly = TRUE)) {
+  install.packages("AGHmatrix")
+}
+
+
+#### DATA ####
+
+# --- GENOTYPIC DATA ---
+# Genotypic matrix with SNP markers coded as 0, 1, 2 (allelic dosage)
+# Rows: 14 animals (first 8 are reference population, last 6 are selection candidates)
+# Columns: 10 SNP markers
+M <- matrix(c(2,0,1,1,0,0,0,2,1,2,
+              1,0,0,0,0,2,0,2,1,0,
+              1,1,2,1,1,0,0,2,1,2,
+              0,0,2,1,0,1,0,2,2,1,
+              0,1,1,2,0,0,0,2,1,2,
+              1,1,0,1,0,2,0,2,2,1,
+              0,0,1,1,0,2,0,2,2,0,
+              0,1,1,0,0,1,0,2,2,0,
+              2,0,0,0,0,1,2,2,1,2,
+              0,0,0,1,1,2,0,2,0,0,
+              0,1,1,0,0,1,0,2,2,1,
+              1,0,0,0,1,1,0,2,0,0,
+              0,0,0,1,1,2,0,2,1,0,
+              1,0,1,1,0,2,0,1,0,0), nrow=14, byrow=T); M
+
+# --- PEDIGREE DATA ---
+# Complete pedigree structure for 26 animals (including founders and descendants)
+# Column 1: Individual ID
+# Column 2: Sire (father) ID (0 = founder)
+# Column 3: Dam (mother) ID (0 = founder)
+# Used to calculate additive relationship matrix (A) based on genealogy
+PED <- matrix(c(1,0,0, 2,0,0, 3,0,0, 4,0,0,
+                5,0,0, 6,0,0, 7,0,0, 8,0,0, 9,0,0, 10,0,0,
+                11,0,0, 12,0,0, 13,0,0, 14,0,0, 15,13,4,
+                16,15,2, 17,15,5, 18,14,6, 19,14,9, 20,14,9,
+                21,1,3, 22,14,8, 23,14,11, 24,14,10,
+                25,14,7, 26,14,12), nrow=26, byrow=T); PED
+
+# --- PHENOTYPIC DATA ---
+# Fat yield measured as Daughter Yield Deviation (DYD)
+# DYD is phenotypic data pre-corrected for systematic environmental effects
+# Length = 14 (only genotyped animals have observations)
+FAT <- c(9,13.4,12.7,15.4,5.9,7.7,10.2,4.8,7.6,8.8,9.8,9.2,11.5,13.3)
+
+# --- VARIANCE COMPONENTS ---
+# Additive genetic variance (σ²ₐ)
+vara <- 35.241
+
+# Environmental/residual variance (σ²ₑ)
+vare <- 245
+
+# --- PEDIGREE RELATIONSHIP MATRIX ---
+# Compute additive relationship matrix (A) for all 26 animals based on pedigree
+# A captures genetic relationships through common ancestry
+# Diagonal elements = 1 + F (where F = inbreeding coefficient)
+# Off-diagonal = 2 × kinship coefficient
+library(AGHmatrix)
+A <- Amatrix(PED, ploidy=2); A
+
+# ============================================================================
+# SNP-BLUP MODEL - REFERENCE POPULATION
+# ============================================================================
+# Model equations (for reference population animals only):
+# [X'X   X'Z  ] [b̂]   [X'y]
+# [Z'X   Z'Z+Iα] [ĝ] = [Z'y]
+#
+# Where:
+# b = fixed effects (mean in this case)
+# g = SNP effects (10 SNPs in this example)
+# Z = centered genotype matrix
+# α = λ = σ²ₑ/σ²ₐ × 2Σpⱼ(1-pⱼ) (relates to heritability and allele frequencies)
+# ============================================================================
+
+# --- STEP 1: CREATE CENTERED GENOTYPE MATRIX FOR REFERENCE POPULATION ---
+# Extract only the 8 reference population animals (rows 1-8)
+# Remove the 6 selection candidates (rows 9-14)
+Z_sr <- M[-c(9:14),]
+
+# --- STEP 2: CALCULATE ALLELE FREQUENCIES IN REFERENCE POPULATION ---
+# For each SNP locus:
+# frequency = sum of alleles in reference population / total number of alleles
+# colSums() = sum each column (total copies of reference allele: 0, 1, or 2)
+# Divided by 2*nrow because each animal has 2 alleles
+freq_sr <- colSums(Z_sr)/(2*nrow(Z_sr)); round(freq_sr,3)
+
+# --- STEP 3: CENTER THE GENOTYPE MATRIX ---
+# Subtract 2×frequency from each genotype value
+# This centers Z around its mean (mean = 2pⱼ where pⱼ is allele frequency)
+# Centering is necessary for proper SNP effect estimation
+# Vectorization: avoid nested loops by operating on entire column
+for(j in 1:ncol(Z_sr)){
+  Z_sr[,j] <- Z_sr[,j] - 2*freq_sr[j]
+}
+round(Z_sr,3)
+# verify centre
+round(colSums(Z_sr)) # should sum to 0
+
+# --- STEP 4: CALCULATE TOTAL HETEROZYGOSITY ---
+# het = 2Σpⱼ(1-pⱼ) = sum of heterozygosity at all loci
+# Used to scale the variance of SNP effects
+# Higher heterozygosity = more genetic variation captured
+het_sr <- sum(2*freq_sr*(1-freq_sr)); round(het_sr,3)
+
+# --- STEP 5: BUILD MIXED MODEL MATRICES ---
+# X_sr: incidence matrix for fixed effect (mean) - column of 1s
+X_sr <- matrix(1,8,1)
+
+# I_sr: identity matrix for SNP effects - regularization matrix
+# Dimension = number of SNPs (10)
+I_sr <- diag(10)
+
+# y_sr: phenotypic observations for reference population
+y_sr <- FAT[1:8]
+
+# --- STEP 6: CALCULATE REGULARIZATION PARAMETER (α) ---
+# α = λ = σ²ₑ/σ²ₐ × 2Σpⱼ(1-pⱼ)
+# Relates environmental variance to genetic variance
+# Higher α = stronger regularization on SNP effects (shrinks estimates toward 0)
+# This prevents overfitting when number of SNPs > number of observations
+alpha_sr <- het_sr*(vare/vara); round(alpha_sr,3)
+
+# --- STEP 7: BUILD LEFT-HAND SIDE (LHS) OF NORMAL EQUATIONS ---
+# LHS = X'X and cross-products of X and Z
+# crossprod() efficiently computes t(A)%*%A for any matrix A
+# cbind() combines X and Z matrices
+LHS_sr <- crossprod(cbind(X_sr,Z_sr))
+
+# Get total number of equations
+neq <- ncol(LHS_sr)
+
+# Add regularization term (I×α) to SNP effect equations (rows/cols 2 through neq)
+# This adds penalty: (Z'Z + I×α)
+# Prevents singular matrix and improves numerical stability
+LHS_sr[2:neq,2:neq] <- LHS_sr[2:neq,2:neq]+I_sr*alpha_sr; LHS_sr
+
+# --- STEP 8: BUILD RIGHT-HAND SIDE (RHS) OF NORMAL EQUATIONS ---
+# RHS = X'y and Z'y
+# t(cbind(X_sr,Z_sr)) = [X'; Z']
+# Multiplied by phenotype vector y
+RHS_sr <- t(cbind(X_sr,Z_sr))%*%y_sr
+
+# --- STEP 9: SOLVE THE MIXED MODEL EQUATIONS ---
+# Solve: LHS × solution = RHS
+# Returns estimated mean (b̂) and SNP effects (ĝ)
+sol_sr <- solve(LHS_sr, RHS_sr); round(sol_sr,3)
+
+# INTERPRETATION OF SOLUTIONS:
+# [1,] = 9.887 = estimated population mean (intercept)
+# [2,]-[11,] = SNP effect estimates (ĝ vector)
+# Each SNP effect represents its contribution to the phenotype (per copy of allele)
+
+# ============================================================================
+# SNP-BLUP MODEL - PREDICTION FOR SELECTION CANDIDATES
+# ============================================================================
+# Once SNP effects are estimated from reference population,
+# predict genomic breeding values (DGV/a) for selection candidates
+# ============================================================================
+
+# --- STEP 10: CREATE CENTERED GENOTYPE MATRIX FOR SELECTION CANDIDATES ---
+# Extract only the 6 selection candidate animals (rows 9-14)
+# Remove reference population (rows 1-8)
+Z_ss <- M[-c(1:8),]
+
+# --- STEP 11: CALCULATE ALLELE FREQUENCIES FOR CANDIDATES ---
+# Note: frequencies may differ slightly from reference population
+# due to different allele frequencies in candidate pool
+freq_ss <- colSums(Z_ss)/(2*nrow(Z_ss)); round(freq_ss,3)
+
+# --- STEP 12: CENTER GENOTYPE MATRIX FOR CANDIDATES ---
+# Same centering procedure as reference population
+# Ensures consistency in SNP effect interpretation
+for(j in 1:ncol(Z_ss)){
+  Z_ss[,j] <- Z_ss[,j] - 2*freq_ss[j]
+}
+round(Z_ss,3)
+
+# --- VERIFY CENTERING ---
+round(colSums(Z_ss))
+
+# --- STEP 13: CALCULATE DIRECT GENOMIC VALUES (DGV/a) FOR CANDIDATES ---
+# DGV = Z_ss × ĝ
+# Matrix multiplication of centered genotypes by SNP effects
+# Result: predicted genomic breeding value for each candidate
+# These predictions are used for selection decisions
+a_ss <- round(Z_ss%*%sol_sr[2:11],3); a_ss
+
+# INTERPRETATION:
+# [1,] = -0.051 = animal 9 genomic breeding value
+# [2,] = 0.042 = animal 10 genomic breeding value
+# ... and so on for animals 11-14
+# Positive values = favorable alleles; Negative = unfavorable alleles
+
+
+
+# ============================================================================
+# GBLUP MODEL
+# The GBLUP model replaces individual SNP effects with genomic relationship
+# matrix (G) that captures LD between markers and true QTL
+# ============================================================================
+# ============================================================================
+# GENOMIC PREDICTION: GBLUP MODEL
+# Universitat Autònoma de Barcelona - Genetics Degree
+# Integrated Laboratory V (GQM)
+# ============================================================================
+# GBLUP = Genomic BLUP / Animal Model BLUP with Genomic Relationships
+# 
+# This model is similar to traditional BLUP animal model, BUT instead of using
+# pedigree-based relationships (A matrix), it uses GENOMIC relationships (G matrix)
+# 
+# Key difference from SNP-BLUP:
+# - SNP-BLUP estimates effects of individual SNPs
+# - GBLUP uses genomic relationship matrix to predict breeding values directly
+#   (captures LD between markers and QTL, not just individual SNP effects)
+# ============================================================================
+
+#### GBLUP MODEL - STEP 1: CREATE CENTERED GENOTYPE MATRIX ####
+
+# Use ALL 14 animals (both reference and selection candidates) to build G matrix
+# This is different from SNP-BLUP where we only use reference population for training
+Z_g <- M
+
+# --- CALCULATE ALLELE FREQUENCIES (using ALL genotyped animals) ---
+# freq_g = frequency of reference allele in entire genotyped population
+# Each animal has 2 alleles per locus, so divide by 2*nrow(Z_g)
+freq_g <- colSums(Z_g)/(2*nrow(Z_g)); round(freq_g,3)
+
+# --- CENTER THE GENOTYPE MATRIX ---
+# Subtract 2×frequency from each genotype value
+# This centers Z around its mean (mean = 2pⱼ)
+# Centering is critical for proper G matrix calculation
+for(j in 1:ncol(Z_g)){
+  Z_g[,j] <- Z_g[,j] - 2*freq_g[j]
+}
+round(Z_g,3)
+
+# --- VERIFY CENTERING ---
+# Column sums should equal 0 (or very close due to rounding)
+# Confirms proper centering of the matrix
+round(colSums(Z_g))
+
+#### GBLUP MODEL - STEP 2: CALCULATE TOTAL HETEROZYGOSITY ####
+
+# het_g = 2Σpⱼ(1-pⱼ) = sum of heterozygosity at all loci
+# Represents the total amount of genetic variation across all SNP markers
+# Used as scaling factor for G matrix construction
+# Higher heterozygosity = more genetic variation to capture
+het_g <- sum(2*freq_g*(1-freq_g)); round(het_g,3)
+
+#### GBLUP MODEL - STEP 3: CONSTRUCT GENOMIC RELATIONSHIP MATRIX (G) ####
+
+# G matrix = VanRaden formula: G = (Z × Z') / 2Σpⱼ(1-pⱼ)
+#
+# Where:
+# Z = centered genotype matrix (14 animals × 10 SNPs)
+# Z' = transpose of Z
+# Z × Z' = genomic relationship matrix (before scaling)
+# het_g = 2Σpⱼ(1-pⱼ) = scaling factor based on heterozygosity
+#
+# G[i,j] represents the proportion of DNA shared between animals i and j
+# G[i,i] (diagonal) ≈ 1 + inbreeding coefficient (self-relationship)
+# E[G] ≈ A (pedigree relationship matrix) - they should be similar on average
+G_g <- (Z_g%*%t(Z_g)) / het_g
+round(G_g,3)
+
+# --- CHECK DETERMINANT ---
+# The determinant tells us if the matrix is invertible
+# If determinant = 0, the matrix is SINGULAR (non-invertible)
+# This causes problems when trying to solve the mixed model equations
+round(det(G_g))
+
+#### GBLUP MODEL - STEP 4: FIX SINGULARITY ISSUE ####
+
+# Problem: G_g matrix is singular (det = 0), so we cannot invert it
+# Solution: Add small value (0.01) to diagonal elements
+# This modifies G slightly: G_gm = G_g + 0.01×I
+# Effect: adds small "noise" that removes singularity without changing structure much
+#
+# Why does this work?
+# - Makes matrix full rank (invertible)
+# - 0.01 is small enough to not substantially alter relationships
+# - This is a regularization technique: ensures numerical stability
+G_gm <- G_g + diag(nrow(M))*.01
+
+# Now we can invert the modified G matrix
+# G_gmi = G inverse (this will be used in the mixed model equations)
+G_gmi <- solve(G_gm); round(G_gmi,3)
+
+#### GBLUP MODEL - STEP 5: BUILD MIXED MODEL EQUATIONS ####
+
+# Mixed Model Equations for GBLUP:
+# [X'X      X'W  ] [b̂]   [X'y]
+# [W'X  W'W+G⁻¹α] [â] = [W'y]
+#
+# Where:
+# b = fixed effects (population mean)
+# a = genomic breeding values (additive genetic effects)
+# X = incidence matrix for fixed effects (column of 1s)
+# W = incidence matrix for random genetic effects (identity matrix if all animals genotyped)
+# G⁻¹ = inverse of genomic relationship matrix
+# α = λ = σ²ₑ/σ²ₐ = ratio of variances (regularization parameter)
+# y = phenotypic observations
+
+# --- INCIDENCE MATRIX FOR FIXED EFFECTS ---
+# X_g = column of 14 ones (one for each animal)
+# Represents that each animal contributes to the population mean
+X_g <- matrix(1,14,1)
+
+# --- INCIDENCE MATRIX FOR RANDOM GENETIC EFFECTS ---
+# W_g = 14×14 identity matrix
+# Represents that each animal has its own genomic breeding value
+# If some animals had no observation, those rows would be removed from W
+W_g <- diag(14)
+
+# --- PHENOTYPIC OBSERVATIONS ---
+# y_g = all 14 phenotypic values (DYD for fat yield)
+# These are the observations being explained by fixed mean + genomic effects
+y_g <- FAT
+
+# --- VARIANCE RATIO PARAMETER (α) ---
+# α = λ = σ²ₑ/σ²ₐ
+# Ratio of environmental variance to additive genetic variance
+# Higher ratio (more environmental noise) = weaker regularization on G⁻¹
+# This parameter scales the inverse relationship matrix in the equations
+# Note: In SNP-BLUP this was het_sr*(vare/vara), here it's just vare/vara
+# because G matrix already incorporates the heterozygosity scaling
+alpha_g <- vare / vara
+
+# --- BUILD LEFT-HAND SIDE (LHS) OF NORMAL EQUATIONS ---
+# LHS = X'X and cross-products of X and W
+# crossprod(cbind(X_g,W_g)) efficiently computes:
+# [X'X  X'W]
+# [W'X  W'W]
+LHS_g <- crossprod(cbind(X_g,W_g))
+
+# Get total number of equations
+neq <- ncol(LHS_g)
+
+# ADD GENOMIC INVERSE RELATIONSHIP TERM (G⁻¹α) TO THE EQUATIONS
+# This modifies the lower-right block: W'W + G⁻¹α
+# The G⁻¹ term regularizes the breeding value estimates
+# It acts as a penalty, pulling estimates toward the population mean
+# Strength of penalty is controlled by α parameter
+LHS_g[2:neq,2:neq] <- LHS_g[2:neq,2:neq]+G_gmi*alpha_g; LHS_g
+
+# --- BUILD RIGHT-HAND SIDE (RHS) OF NORMAL EQUATIONS ---
+# RHS = X'y and W'y
+# t(cbind(X_g,W_g)) = [X'; W']
+# Multiplied by phenotype vector y
+RHS_g <- t(cbind(X_g,W_g))%*%y_g; RHS_g
+
+#### GBLUP MODEL - STEP 6: SOLVE THE MIXED MODEL EQUATIONS ####
+
+# Solve: LHS × solution = RHS
+# Returns estimated mean (b̂) and genomic breeding values (â)
+sol_g <- solve(LHS_g, RHS_g); round(sol_g,3)
+
+# --- INTERPRETATION OF SOLUTIONS ---
+# [1,] = 9.950 = estimated population mean (intercept)
+# [2,]-[15,] = genomic breeding values for each of the 14 animals
+#
+# These are DIRECT predictions of breeding values, NOT SNP effects
+# Each value represents the estimated additive genetic merit of that animal
+# based on its entire genomic relationship to other animals
+#
+# Contrast with SNP-BLUP:
+# - SNP-BLUP: predicts SNP effects, then multiplies by individual's genotypes
+# - GBLUP: directly predicts breeding value using genomic relationships
+#
+# Advantages of GBLUP over SNP-BLUP:
+# 1. More stable when number of SNPs > number of reference animals
+# 2. Accounts for LD (linkage disequilibrium) between markers and QTL
+# 3. Better predictions for recently admixed populations
+# 4. Simpler interpretation (no need to compute DGV = Z×g separately)
+#
+# Advantages of SNP-BLUP over GBLUP:
+# 1. Gives explicit SNP effect estimates (useful for understanding biology)
+# 2. Can use results for other traits (SNP effects are trait-specific)
+# 3. More transparent about which SNPs drive predictions
+
+# ============================================================================
+# SUMMARY: GBLUP vs SNP-BLUP
+# ============================================================================
+#
+# SNP-BLUP (from previous code):
+# - Estimates 10 SNP effects (g vector)
+# - Predictions for selection candidates: a_ss = Z_ss %*% g
+# - Uses regularization parameter: α = het × (σ²ₑ/σ²ₐ)
+#
+# GBLUP (this code):
+# - Estimates 14 breeding values (one per animal)
+# - Predictions come directly from solving equations
+# - Uses regularization parameter: α = σ²ₑ/σ²ₐ
+# - G matrix already incorporates heterozygosity, so no extra scaling needed
+#
+# Both models use the same SNP data (M matrix)
+# Both account for linkage disequilibrium through genomic information
+# Both make genomic predictions (as opposed to pedigree-only BLUP)
+# ============================================================================
